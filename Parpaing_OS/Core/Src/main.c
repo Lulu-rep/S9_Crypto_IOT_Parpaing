@@ -41,6 +41,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+UART_HandleTypeDef huart1;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -50,13 +52,20 @@ void SystemClock_Config(void);
 static void SystemPower_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ICACHE_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#include "stsafea_core.h"
+#include "stsafea_service.h"
 
+#include <stdio.h>
+
+StSafeA_Handle_t stsafea_handle;
+uint8_t stsafe_rx_tx_buffer[512]; // Taille standard pour les échanges I2C
 /* USER CODE END 0 */
 
 /**
@@ -67,7 +76,6 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -92,10 +100,81 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ICACHE_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  // 1. Activation de l'alimentation (PF11)
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_11, GPIO_PIN_RESET);
+  HAL_Delay(100);
+
+  // 2. Initialisation unique
+  StSafeA_ResponseCode_t res = StSafeA_Init(&stsafea_handle, stsafe_rx_tx_buffer);
+  printf("Init Middleware: %02X\r\n", res);
+
+  if (res == STSAFEA_OK)
+  {
+      StSafeA_ProductDataBuffer_t product_info;
+
+      // 3. Appel de la requête
+      res = StSafeA_ProductDataQuery(&stsafea_handle,
+              &product_info,
+              19);
+      printf("Resultat Query: %02X\r\n", res);
+
+      if (res == STSAFEA_OK)
+      {
+          // Si res est 0x00, l'accès raw_data est sécurisé
+          uint8_t *raw_data = (uint8_t *)&product_info;
+          printf("STSAFE-A1xx detecte !\r\n");
+          printf("Product Code: %02X\r\n", raw_data[0]);
+      }
+      else
+      {
+          printf("Erreur Query: %02X\r\n", res);
+      }
+  }
+
+  /* Variables pour stocker la clé publique et les métadonnées */
+  uint8_t point_rep;
+  StSafeA_LVBuffer_t pubX, pubY;  // CORRECTION: Utiliser StSafeA_LVBuffer_t au lieu de StSafeA_LV_Data_t
+  uint8_t dataX[32], dataY[32];
+
+  // Initialisation des structures LV (Length-Value)
+  pubX.Length = 32;
+  pubX.Data  = dataX;  // CORRECTION: Utiliser .Data au lieu de .pData
+  pubY.Length = 32;
+  pubY.Data  = dataY;  // CORRECTION: Utiliser .Data au lieu de .pData
+
+  /* Appel conforme au prototype */
+  res = StSafeA_GenerateKeyPair(  // CORRECTION: Ne pas redéclarer 'res'
+      &stsafea_handle,
+      STSAFEA_KEY_SLOT_1,          // InKeySlotNum
+      0xFFFF,                      // InUseLimit (Pas de limite)
+      0,                           // InChangeAuthFlagsRight
+      (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN |
+       STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN), // InAuthorizationFlags
+	   (StSafeA_CurveId_t)0,  // CORRECTION: Utiliser le bon nom de constante
+      32,                          // InPubXYLen
+      &point_rep,                  // pOutPointReprensentationId
+      &pubX,                       // pOutPubX
+      &pubY,                       // pOutPubY
+      0                            // InMAC (Pas d'authentification MAC)
+  );
+
+  if (res == STSAFEA_OK)
+  {
+      printf("Cle ECC generee avec succes !\r\n");
+      printf("Public Key X: ");
+      for(int i=0; i<32; i++) printf("%02X", pubX.Data[i]);  // CORRECTION: .Data au lieu de .pData
+      printf("\r\nPublic Key Y: ");
+      for(int i=0; i<32; i++) printf("%02X", pubY.Data[i]);  // CORRECTION: .Data au lieu de .pData
+      printf("\r\n");
+  }
+  else
+  {
+      printf("Erreur Generation Cle: %02X\r\n", res);
+  }
 
   /* USER CODE END 2 */
-
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -209,6 +288,54 @@ static void MX_ICACHE_Init(void)
   /* USER CODE BEGIN ICACHE_Init 2 */
 
   /* USER CODE END ICACHE_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -351,14 +478,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USER_Button_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PH4 PH5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
-  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-
   /*Configure GPIO pins : LED_RED_Pin LED_GREEN_Pin Mems_VL53_xshut_Pin */
   GPIO_InitStruct.Pin = LED_RED_Pin|LED_GREEN_Pin|Mems_VL53_xshut_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -381,14 +500,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   GPIO_InitStruct.Alternate = GPIO_AF3_OCTOSPI1;
   HAL_GPIO_Init(OCTOSPI_R_IO4_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : T_VCP_RX_Pin T_VCP_TX_Pin */
-  GPIO_InitStruct.Pin = T_VCP_RX_Pin|T_VCP_TX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART1;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : USB_C_P_Pin USB_C_PA11_Pin */
   GPIO_InitStruct.Pin = USB_C_P_Pin|USB_C_PA11_Pin;
@@ -489,7 +600,17 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* USER CODE BEGIN 4 */
+/**
+  * @brief Redirection du printf vers USART1
+  */
+int _write(int file, char *ptr, int len)
+{
+  // On utilise l'USART1 avec un timeout de 10ms par caractère
+  HAL_StatusTypeDef status = HAL_UART_Transmit(&huart1, (uint8_t *)ptr, len, HAL_MAX_DELAY);
 
+  return (status == HAL_OK) ? len : -1;
+}
 /* USER CODE END 4 */
 
 /**
