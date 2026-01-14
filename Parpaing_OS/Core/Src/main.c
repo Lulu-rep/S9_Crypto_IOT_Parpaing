@@ -31,7 +31,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define VEML6030_ADDR (0x10 << 1) // I2C Address shifted for HAL
+#define VEML6030_REG_ALS_CONF 0x00
+#define VEML6030_REG_ALS_DATA 0x04
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,7 +46,8 @@
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-
+uint16_t raw_als_data = 0;
+float lux_value = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,54 +105,47 @@ int main(void)
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  // 1. Activation de l'alimentation (PF11)
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_11, GPIO_PIN_RESET);
   HAL_Delay(100);
-
-  // 2. Initialisation unique
   StSafeA_ResponseCode_t res = StSafeA_Init(&stsafea_handle, stsafe_rx_tx_buffer);
-  printf("Init Middleware: %02X\r\n", res);
 
-  if (res == STSAFEA_OK)
-  {
-      StSafeA_ProductDataBuffer_t product_info;
+//  if (res == STSAFEA_OK)
+//  {
+//      StSafeA_ProductDataBuffer_t product_info;
+//
+//      res = StSafeA_ProductDataQuery(&stsafea_handle,
+//              &product_info,
+//              19);
+//      printf("Resultat Query: %02X\r\n", res);
+//
+//      if (res == STSAFEA_OK)
+//      {
+//          uint8_t *raw_data = (uint8_t *)&product_info;
+//          printf("STSAFE-A1xx detecte !\r\n");
+//          printf("Product Code: %02X\r\n", raw_data[0]);
+//      }
+//      else
+//      {
+//          printf("Erreur Query: %02X\r\n", res);
+//      }
+//  }
 
-      // 3. Appel de la requête
-      res = StSafeA_ProductDataQuery(&stsafea_handle,
-              &product_info,
-              19);
-      printf("Resultat Query: %02X\r\n", res);
-
-      if (res == STSAFEA_OK)
-      {
-          // Si res est 0x00, l'accès raw_data est sécurisé
-          uint8_t *raw_data = (uint8_t *)&product_info;
-          printf("STSAFE-A1xx detecte !\r\n");
-          printf("Product Code: %02X\r\n", raw_data[0]);
-      }
-      else
-      {
-          printf("Erreur Query: %02X\r\n", res);
-      }
-  }
-
-  /* Variables pour stocker la clé publique et les métadonnées */
   uint8_t point_rep;
-  StSafeA_LVBuffer_t pubX, pubY;  // CORRECTION: Utiliser StSafeA_LVBuffer_t au lieu de StSafeA_LV_Data_t
+  StSafeA_LVBuffer_t pubX, pubY;
   uint8_t dataX[32], dataY[32];
 
-  // Initialisation des structures LV (Length-Value)
+
   pubX.Length = 32;
-  pubX.Data  = dataX;  // CORRECTION: Utiliser .Data au lieu de .pData
+  pubX.Data  = dataX;
   pubY.Length = 32;
-  pubY.Data  = dataY;  // CORRECTION: Utiliser .Data au lieu de .pData
+  pubY.Data  = dataY;
 
   /* Appel conforme au prototype */
-  res = StSafeA_GenerateKeyPair(  // CORRECTION: Ne pas redéclarer 'res'
+  res = StSafeA_GenerateKeyPair(
       &stsafea_handle,
-      STSAFEA_KEY_SLOT_1,          // InKeySlotNum
-      0xFFFF,                      // InUseLimit (Pas de limite)
-      0,                           // InChangeAuthFlagsRight
+      STSAFEA_KEY_SLOT_1,
+      0xFFFF,
+      0,
       (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN |
        STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN), // InAuthorizationFlags
 	   (StSafeA_CurveId_t)0,  // CORRECTION: Utiliser le bon nom de constante
@@ -174,11 +170,44 @@ int main(void)
       printf("Erreur Generation Cle: %02X\r\n", res);
   }
 
+  // Register 0x00 (Configuration)
+    // Data: 0x0000 (ALS Gain x1, Integration Time 100ms, ALS Power ON)
+    uint8_t config_data[3] = {VEML6030_REG_ALS_CONF, 0x00, 0x00};
+
+    // Check if sensor is present and wake it up
+    if (HAL_I2C_Master_Transmit(&hi2c2, VEML6030_ADDR, config_data, 3, 100) != HAL_OK) {
+        printf("I2C Error: Sensor not found!\r\n");
+        HAL_GPIO_WritePin(GPIOH, LED_RED_Pin, GPIO_PIN_SET);
+    } else {
+    	printf("VEML6030 initialized and waking up...\r\n");
+    }
+    HAL_Delay(150);
+
   /* USER CODE END 2 */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  uint8_t reg = VEML6030_REG_ALS_DATA;
+	  uint8_t buffer[2] = {0};
+
+	  // Try to read the ALS data
+	  HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c2, VEML6030_ADDR, reg, I2C_MEMADD_SIZE_8BIT, buffer, 2, 100);
+
+	  if (status == HAL_OK) {
+		  raw_als_data = ((uint16_t)buffer[1] << 8) | buffer[0];
+		  lux_value = (float)raw_als_data * 0.0576f;
+
+		  // If raw is still 0, the sensor might be in total darkness or still shut down
+		  printf("Lux: %.2f (Raw: %u)\r\n", lux_value, raw_als_data);
+	  }
+	  else {
+		  printf("I2C Read Failed. Status: %d\r\n", status);
+	  }
+
+	  HAL_GPIO_TogglePin(GPIOH, LED_GREEN_Pin);
+	  HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -600,10 +629,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* USER CODE BEGIN 4 */
-/**
-  * @brief Redirection du printf vers USART1
-  */
+
 int _write(int file, char *ptr, int len)
 {
   // On utilise l'USART1 avec un timeout de 10ms par caractère
