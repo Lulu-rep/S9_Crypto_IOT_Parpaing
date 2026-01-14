@@ -133,8 +133,48 @@ int main(void)
       }
   }
 
-  /* USER CODE END 2 */
+  /* Variables pour stocker la clé publique et les métadonnées */
+  uint8_t point_rep;
+  StSafeA_LVBuffer_t pubX, pubY;  // CORRECTION: Utiliser StSafeA_LVBuffer_t au lieu de StSafeA_LV_Data_t
+  uint8_t dataX[32], dataY[32];
 
+  // Initialisation des structures LV (Length-Value)
+  pubX.Length = 32;
+  pubX.Data  = dataX;  // CORRECTION: Utiliser .Data au lieu de .pData
+  pubY.Length = 32;
+  pubY.Data  = dataY;  // CORRECTION: Utiliser .Data au lieu de .pData
+
+  /* Appel conforme au prototype */
+  res = StSafeA_GenerateKeyPair(  // CORRECTION: Ne pas redéclarer 'res'
+      &stsafea_handle,
+      STSAFEA_KEY_SLOT_1,          // InKeySlotNum
+      0xFFFF,                      // InUseLimit (Pas de limite)
+      0,                           // InChangeAuthFlagsRight
+      (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN |
+       STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN), // InAuthorizationFlags
+	   (StSafeA_CurveId_t)0,  // CORRECTION: Utiliser le bon nom de constante
+      32,                          // InPubXYLen
+      &point_rep,                  // pOutPointReprensentationId
+      &pubX,                       // pOutPubX
+      &pubY,                       // pOutPubY
+      0                            // InMAC (Pas d'authentification MAC)
+  );
+
+  if (res == STSAFEA_OK)
+  {
+      printf("Cle ECC generee avec succes !\r\n");
+      printf("Public Key X: ");
+      for(int i=0; i<32; i++) printf("%02X", pubX.Data[i]);  // CORRECTION: .Data au lieu de .pData
+      printf("\r\nPublic Key Y: ");
+      for(int i=0; i<32; i++) printf("%02X", pubY.Data[i]);  // CORRECTION: .Data au lieu de .pData
+      printf("\r\n");
+  }
+  else
+  {
+      printf("Erreur Generation Cle: %02X\r\n", res);
+  }
+
+  /* USER CODE END 2 */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
