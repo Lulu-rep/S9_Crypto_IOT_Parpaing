@@ -182,7 +182,20 @@ void Error_Handler(void);
 #define WRLS_WKUP_W_GPIO_Port GPIOF
 
 /* USER CODE BEGIN Private defines */
+/* Alias pour le driver MX_WIFI SPI */
+#define MXCHIP_RESET_Pin         WRLS_WKUP_W_Pin       // Vérifie si c'est bien PF15
+#define MXCHIP_RESET_GPIO_Port   WRLS_WKUP_W_GPIO_Port
 
+#define MXCHIP_NSS_Pin           WRLS_SPI2_NSS_Pin     // PB12
+#define MXCHIP_NSS_GPIO_Port     WRLS_SPI2_NSS_GPIO_Port
+
+#define MXCHIP_NOTIFY_Pin        WRLS_NOTIFY_Pin       // PD14
+#define MXCHIP_NOTIFY_GPIO_Port  WRLS_NOTIFY_GPIO_Port
+
+#define MXCHIP_FLOW_Pin          WRLS_FLOW_Pin         // PG15
+#define MXCHIP_FLOW_GPIO_Port    WRLS_FLOW_GPIO_Port
+extern SPI_HandleTypeDef hspi2;
+#define MXCHIP_SPI hspi2
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
