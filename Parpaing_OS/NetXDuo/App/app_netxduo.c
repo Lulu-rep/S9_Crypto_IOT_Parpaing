@@ -27,6 +27,7 @@
 #include "nx_ip.h"
 #include  MOSQUITTO_CERT_FILE
 #include "nx_secure_tls_api.h"
+#include "nx_http_client.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +37,7 @@ extern RNG_HandleTypeDef hrng;
 TX_THREAD AppMainThread;
 TX_THREAD AppMQTTClientThread;
 TX_THREAD AppSNTPThread;
+TX_THREAD AppHTTPThread;
 
 TX_QUEUE  MsgQueueOne;
 
@@ -46,6 +48,7 @@ NX_IP           IpInstance;
 NX_DHCP         DhcpClient;
 NXD_MQTT_CLIENT MqttClient;
 NX_SNTP_CLIENT  SntpClient;
+NX_HTTP_CLIENT  HttpClient;
 static NX_DNS   DnsClient;
 
 TX_EVENT_FLAGS_GROUP     SntpFlags;
@@ -91,6 +94,7 @@ ULONG                    current_time;
 /* USER CODE BEGIN PFP */
 static VOID App_Main_Thread_Entry(ULONG thread_input);
 static VOID App_MQTT_Client_Thread_Entry(ULONG thread_input);
+static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input);
 static VOID App_SNTP_Thread_Entry(ULONG thread_input);
 static VOID ip_address_change_notify_callback(NX_IP *ip_instance, VOID *ptr);
 static VOID time_update_callback(NX_SNTP_TIME_MESSAGE *time_update_ptr, NX_SNTP_TIME *local_time);
@@ -238,20 +242,36 @@ UINT MX_NetXDuo_Init(VOID *memory_ptr)
     return NX_NOT_ENABLED;
   }
 
-  /* Allocate the memory for MQTT client thread   */
+  /* Allocate the memory for HTTP client thread   */
   if (tx_byte_allocate(byte_pool, (VOID **) &pointer, THREAD_MEMORY_SIZE, TX_NO_WAIT) != TX_SUCCESS)
   {
     return TX_POOL_ERROR;
   }
 
-  /* create the MQTT client thread */
-  ret = tx_thread_create(&AppMQTTClientThread, "App MQTT Thread", App_MQTT_Client_Thread_Entry, 0, pointer, THREAD_MEMORY_SIZE,
-                         MQTT_PRIORITY, MQTT_PRIORITY, TX_NO_TIME_SLICE, TX_DONT_START);
+  ret = tx_thread_create(&AppHTTPThread, "App POST Thread", App_HTTP_Get_Thread_Entry, 0, pointer, THREAD_MEMORY_SIZE,
+            MQTT_PRIORITY, MQTT_PRIORITY, TX_NO_TIME_SLICE, TX_DONT_START);
 
-  if (ret != TX_SUCCESS)
+  if (ret != NX_SUCCESS)
   {
-    return NX_NOT_ENABLED;
+      printf("Erreur fatale: nx_http_client_create (0x%02x)\n", ret);
+      tx_thread_suspend(tx_thread_identify()); // On arrête tout avant le crash
   }
+
+//  /* Allocate the memory for MQTT client thread   */
+//  if (tx_byte_allocate(byte_pool, (VOID **) &pointer, THREAD_MEMORY_SIZE, TX_NO_WAIT) != TX_SUCCESS)
+//  {
+//    return TX_POOL_ERROR;
+//  }
+//
+//
+//  /* create the MQTT client thread */
+//  ret = tx_thread_create(&AppMQTTClientThread, "App MQTT Thread", App_MQTT_Client_Thread_Entry, 0, pointer, THREAD_MEMORY_SIZE,
+//                         MQTT_PRIORITY, MQTT_PRIORITY, TX_NO_TIME_SLICE, TX_DONT_START);
+//
+//  if (ret != TX_SUCCESS)
+//  {
+//    return NX_NOT_ENABLED;
+//  }
 
   /* Allocate the MsgQueueOne.  */
   if (tx_byte_allocate(byte_pool, (VOID **) &pointer, APP_QUEUE_SIZE*sizeof(ULONG), TX_NO_WAIT) != TX_SUCCESS)
@@ -360,6 +380,8 @@ static VOID App_Main_Thread_Entry(ULONG thread_input)
 
   /* start the SNTP client thread */
   tx_thread_resume(&AppSNTPThread);
+
+  tx_thread_resume(&AppHTTPThread);
 
   /* this thread is not needed any more, we relinquish it */
   tx_thread_relinquish();
@@ -573,6 +595,7 @@ static VOID App_SNTP_Thread_Entry(ULONG thread_input)
 */
 static VOID App_MQTT_Client_Thread_Entry(ULONG thread_input)
 {
+	printf("MQTT thread");
   UINT ret = NX_SUCCESS;
   NXD_ADDRESS mqtt_server_ip;
   ULONG events;
@@ -716,5 +739,53 @@ static VOID App_MQTT_Client_Thread_Entry(ULONG thread_input)
 
   /* test OK -> success Handler */
   Success_Handler();
+}
+
+static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input)
+{
+  UINT ret;
+  NXD_ADDRESS server_ip;
+  NX_PACKET *response_packet;
+
+  printf("HTTP GET thread started (API 6.1.6)\n");
+
+  server_ip.nxd_ip_version = NX_IP_VERSION_V4;
+  server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
+
+  while(1)
+  {
+    /* 1. Création du client à chaque tour pour garantir un état propre (READY) */
+    ret = nx_http_client_create(&HttpClient, "HTTP Client", &IpInstance, &AppPool, 2048);
+    if (ret != NX_SUCCESS) {
+        printf("Erreur création client: 0x%02x\n", ret);
+        tx_thread_sleep(100);
+        continue;
+    }
+
+    nx_http_client_set_connect_port(&HttpClient, 8000);
+
+    printf("\nEnvoi requête GET...\n");
+    ret = nxd_http_client_get_start(&HttpClient, &server_ip, "/", NX_NULL, 0, NX_NULL, NX_NULL, TX_WAIT_FOREVER);
+
+    if (ret == NX_SUCCESS)
+    {
+        ret = nx_http_client_get_packet(&HttpClient, &response_packet, 1000);
+        if (ret == NX_SUCCESS)
+        {
+        	printf("Contenu : %s\n", response_packet->nx_packet_prepend_ptr);
+        	nx_packet_release(response_packet);
+        }
+    }
+    else
+    {
+        printf("Erreur GET: 0x%02x\n", ret);
+    }
+
+    /* 2. Suppression du client pour libérer la socket TCP interne */
+    /* C'est l'équivalent d'un disconnect + cleanup dans cette version */
+    nx_http_client_delete(&HttpClient);
+
+    tx_thread_sleep(500); // Pause avant la prochaine tentative
+  }
 }
 /* USER CODE END 1 */

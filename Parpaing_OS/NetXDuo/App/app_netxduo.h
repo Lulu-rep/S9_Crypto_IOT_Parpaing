@@ -56,7 +56,7 @@ extern "C" {
 #define DEFAULT_MAIN_PRIORITY       15
 #define MQTT_PRIORITY               12
 #define SNTP_PRIORITY               12
-#define THREAD_MEMORY_SIZE          4 * DEFAULT_MEMORY_SIZE
+#define THREAD_MEMORY_SIZE          8 * DEFAULT_MEMORY_SIZE
 #define APP_QUEUE_SIZE              10
 
 /* MQTT Client configuration */
@@ -72,7 +72,7 @@ extern "C" {
 
 #define MQTT_BROKER_NAME            "test.mosquitto.org" /* MQTT Server */
 
-#define MQTT_PORT                   NXD_MQTT_TLS_PORT
+#define MQTT_PORT                   NXD_MQTT_PORT
 
 #define QOS0                        0
 #define QOS1                        1
@@ -82,7 +82,7 @@ extern "C" {
 
 /* SNTP Client configuration */
 #define SNTP_CLIENT_THREAD_MEMORY    6 * DEFAULT_MEMORY_SIZE
-#define SNTP_SERVER_NAME             "time1.google.com"
+#define SNTP_SERVER_NAME             "time.google.com"
 #define SNTP_UPDATE_EVENT            1
 /* Define how often the demo checks for SNTP updates. */
 #define PERIODIC_CHECK_INTERVAL      (60 * NX_IP_PERIODIC_RATE)
