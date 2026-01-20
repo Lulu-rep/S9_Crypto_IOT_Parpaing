@@ -67,18 +67,18 @@ int32_t mxwifi_probe(void **ll_drv_context);
 #define WIFI_PASSWORD                               "pokedaine"
 
 /* DEBUG LOG */
-/* #define MX_WIFI_API_DEBUG */
-/* #define MX_WIFI_IPC_DEBUG */
-/* #define MX_WIFI_HCI_DEBUG */
-/* #define MX_WIFI_SLIP_DEBUG */
-/* #define MX_WIFI_IO_DEBUG */
+//#define MX_WIFI_API_DEBUG
+//#define MX_WIFI_IPC_DEBUG
+//#define MX_WIFI_HCI_DEBUG
+//#define MX_WIFI_SLIP_DEBUG
+//#define MX_WIFI_IO_DEBUG
 
 
 #define MX_WIFI_PRODUCT_NAME                        ("MXCHIP-WIFI")
 #define MX_WIFI_PRODUCT_ID                          ("EMW3080B")
 
 #ifndef MX_WIFI_USE_SPI
-#define MX_WIFI_USE_SPI                             (0)
+#define MX_WIFI_USE_SPI                             (1)
 #endif /* MX_WIFI_USE_SPI */
 
 
@@ -102,7 +102,7 @@ int32_t mxwifi_probe(void **ll_drv_context);
 #define MX_WIFI_SOCKET_DATA_SIZE                    ((MX_WIFI_IPC_PAYLOAD_SIZE)-12) /* MX_WIFI_IPC_PAYLOAD_SIZE - socket_api_params_header */
 
 #ifndef MX_WIFI_CMD_TIMEOUT
-#define MX_WIFI_CMD_TIMEOUT                         (10000)
+#define MX_WIFI_CMD_TIMEOUT                         (20000)
 #endif
 #define MX_WIFI_MAX_SOCKET_NBR                      (8)
 #define MX_WIFI_MAX_DETECTED_AP                     (10)
@@ -115,7 +115,7 @@ int32_t mxwifi_probe(void **ll_drv_context);
 
 #define MX_WIFI_FW_REV_SIZE                         24
 #ifndef MX_WIFI_SPI_THREAD_PRIORITY
-#define MX_WIFI_SPI_THREAD_PRIORITY                     (OSPRIORITYREALTIME)
+#define MX_WIFI_SPI_THREAD_PRIORITY                     (3)
 #endif /* MX_WIFI_SPI_THREAD_PRIORITY */
 #ifndef MX_WIFI_SPI_THREAD_STACK_SIZE
 #define MX_WIFI_SPI_THREAD_STACK_SIZE                   (1024)

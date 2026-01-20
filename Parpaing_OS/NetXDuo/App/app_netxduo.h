@@ -50,10 +50,10 @@ extern "C" {
 
   /* Threads configuration */
 #define PAYLOAD_SIZE                1544
-#define NX_PACKET_POOL_SIZE         (( PAYLOAD_SIZE + sizeof(NX_PACKET)) * 20)
+#define NX_PACKET_POOL_SIZE         (( PAYLOAD_SIZE + sizeof(NX_PACKET)) * 50)
 #define DEFAULT_MEMORY_SIZE         1024
 #define ARP_MEMORY_SIZE             DEFAULT_MEMORY_SIZE
-#define DEFAULT_MAIN_PRIORITY       10
+#define DEFAULT_MAIN_PRIORITY       15
 #define MQTT_PRIORITY               12
 #define SNTP_PRIORITY               12
 #define THREAD_MEMORY_SIZE          4 * DEFAULT_MEMORY_SIZE
