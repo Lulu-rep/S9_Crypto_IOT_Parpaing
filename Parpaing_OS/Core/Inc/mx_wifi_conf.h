@@ -34,8 +34,10 @@ int32_t mxwifi_probe(void **ll_drv_context);
 
 #include "cmsis_os2.h" /* Obligatoire pour accéder à osDelay */
 
+#include "tx_api.h"
 #ifndef DELAY_MS
-#define DELAY_MS(ms) osDelay(ms)
+/* Convertit les ms en Ticks ThreadX (souvent 1 tick = 1ms) */
+#define DELAY_MS(ms) tx_thread_sleep((ms * TX_TIMER_TICKS_PER_SECOND) / 1000)
 #endif
   
 /* use SPI interface by default */
@@ -61,8 +63,8 @@ int32_t mxwifi_probe(void **ll_drv_context);
 #endif /* MX_WIFI_TX_BUFFER_NO_COPY */
 
 
-#define WIFI_SSID                                   "YOUR_SSID"
-#define WIFI_PASSWORD                               "YOUR_PASSWORD"
+#define WIFI_SSID                                   "Xiaomi 11T Pro"
+#define WIFI_PASSWORD                               "pokedaine"
 
 /* DEBUG LOG */
 /* #define MX_WIFI_API_DEBUG */

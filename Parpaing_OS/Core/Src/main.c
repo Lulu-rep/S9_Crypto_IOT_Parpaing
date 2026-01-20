@@ -770,6 +770,22 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   }
 }
 
+/* USER CODE BEGIN 4 */
+/**
+  * @brief  Fonction de rappel en cas de succès de l'initialisation réseau
+  * @retval None
+  */
+void Success_Handler(void)
+{
+  /* Optionnel : Allumer une LED pour confirmer que tout fonctionne */
+  while (1)
+  {
+    printf("ALO?");
+
+  }
+}
+/* USER CODE END 4 */
+
 /* USER CODE END 4 */
 
 /**
