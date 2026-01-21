@@ -82,7 +82,7 @@ extern "C" {
 
 /* SNTP Client configuration */
 #define SNTP_CLIENT_THREAD_MEMORY    6 * DEFAULT_MEMORY_SIZE
-#define SNTP_SERVER_NAME             "time.google.com"
+#define SNTP_SERVER_NAME             "time1.google.com"
 #define SNTP_UPDATE_EVENT            1
 /* Define how often the demo checks for SNTP updates. */
 #define PERIODIC_CHECK_INTERVAL      (60 * NX_IP_PERIODIC_RATE)

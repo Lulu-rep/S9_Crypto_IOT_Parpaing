@@ -28,14 +28,18 @@
 #include  MOSQUITTO_CERT_FILE
 #include "nx_secure_tls_api.h"
 #include "nx_http_client.h"
+#include "stsafea_core.h"
+#include "stsafea_service.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 extern RNG_HandleTypeDef hrng;
 
+extern StSafeA_Handle_t stsafea_handle;
+
 TX_THREAD AppMainThread;
-TX_THREAD AppMQTTClientThread;
 TX_THREAD AppSNTPThread;
 TX_THREAD AppHTTPThread;
 
@@ -46,7 +50,6 @@ TX_SEMAPHORE Semaphore;
 NX_PACKET_POOL  AppPool;
 NX_IP           IpInstance;
 NX_DHCP         DhcpClient;
-NXD_MQTT_CLIENT MqttClient;
 NX_SNTP_CLIENT  SntpClient;
 NX_HTTP_CLIENT  HttpClient;
 static NX_DNS   DnsClient;
@@ -100,6 +103,8 @@ static VOID ip_address_change_notify_callback(NX_IP *ip_instance, VOID *ptr);
 static VOID time_update_callback(NX_SNTP_TIME_MESSAGE *time_update_ptr, NX_SNTP_TIME *local_time);
 static ULONG nx_secure_tls_session_time_function(void);
 static UINT dns_create(NX_DNS *dns_ptr);
+static UINT Performance_ECDH_Exchange(VOID);
+
 /* USER CODE END PFP */
 
 /**
@@ -584,161 +589,8 @@ static VOID App_SNTP_Thread_Entry(ULONG thread_input)
   }
 
   /* start the MQTT client thread */
-  tx_thread_resume(&AppMQTTClientThread);
+  //tx_thread_resume(&AppMQTTClientThread);
 
-}
-
-/**
-* @brief  MQTT Client thread entry.
-* @param thread_input: ULONG user argument used by the thread entry
-* @retval none
-*/
-static VOID App_MQTT_Client_Thread_Entry(ULONG thread_input)
-{
-	printf("MQTT thread");
-  UINT ret = NX_SUCCESS;
-  NXD_ADDRESS mqtt_server_ip;
-  ULONG events;
-  UINT aRandom32bit;
-  UINT topic_length, message_length;
-  UINT remaining_msg = NB_MESSAGE;
-  UINT message_count = 0;
-  UINT unlimited_publish = NX_FALSE;
-
-  mqtt_server_ip.nxd_ip_version = 4;
-
-  /* Look up MQTT Server address. */
-  ret = nx_dns_host_by_name_get(&DnsClient, (UCHAR *)MQTT_BROKER_NAME,
-                                &mqtt_server_ip.nxd_ip_address.v4, DEFAULT_TIMEOUT);
-
-  /* Check status.  */
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-
-  /* Create MQTT client instance. */
-  ret = nxd_mqtt_client_create(&MqttClient, "my_client", CLIENT_ID_STRING, STRLEN(CLIENT_ID_STRING),
-                               &IpInstance, &AppPool, (VOID*)mqtt_client_stack, MQTT_CLIENT_STACK_SIZE,
-                               MQTT_THREAD_PRIORTY, NX_NULL, 0);
-
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  /* Register the disconnect notification function. */
-  nxd_mqtt_client_disconnect_notify_set(&MqttClient, my_disconnect_func);
-
-  /* Set the receive notify function. */
-  nxd_mqtt_client_receive_notify_set(&MqttClient, my_notify_func);
-
-  /* Create an MQTT flag */
-  ret = tx_event_flags_create(&mqtt_app_flag, "my app event");
-  if (ret != TX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  /* Start a secure connection to the server. */
-  ret = nxd_mqtt_client_secure_connect(&MqttClient, &mqtt_server_ip, MQTT_PORT, tls_setup_callback,
-                                       MQTT_KEEP_ALIVE_TIMER, CLEAN_SESSION, NX_WAIT_FOREVER);
-
-  if (ret != NX_SUCCESS)
-  {
-    printf("\nMQTT client failed to connect to broker < %s >.\n",MQTT_BROKER_NAME);
-    Error_Handler();
-  }
-  else
-  {
-    printf("\nMQTT client connected to broker < %s > at PORT %d :\n",MQTT_BROKER_NAME, MQTT_PORT);
-  }
-
-  /* Subscribe to the topic with QoS level 1. */
-  ret = nxd_mqtt_client_subscribe(&MqttClient, TOPIC_NAME, STRLEN(TOPIC_NAME), QOS1);
-
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  if (NB_MESSAGE ==0)
-    unlimited_publish = NX_TRUE;
-
-  while(unlimited_publish || remaining_msg)
-  {
-    aRandom32bit = message_generate();
-
-    snprintf(message, STRLEN(message), "%u", aRandom32bit);
-
-    /* Publish a message with QoS Level 1. */
-    ret = nxd_mqtt_client_publish(&MqttClient, TOPIC_NAME, STRLEN(TOPIC_NAME),
-                                  (CHAR*)message, STRLEN(message), NX_TRUE, QOS1, NX_WAIT_FOREVER);
-    if (ret != NX_SUCCESS)
-    {
-      Error_Handler();
-    }
-
-    /* wait for the broker to publish the message. */
-    tx_event_flags_get(&mqtt_app_flag, DEMO_ALL_EVENTS, TX_OR_CLEAR, &events, TX_WAIT_FOREVER);
-
-    /* check event received */
-        if (events & DEMO_MESSAGE_EVENT)
-    {
-      /* Get messages from the broker. */
-      do
-      {
-        ret = nxd_mqtt_client_message_get(&MqttClient, topic_buffer, sizeof(topic_buffer), &topic_length, message_buffer, sizeof(message_buffer), &message_length);
-        if (ret  == NXD_MQTT_SUCCESS)
-        {
-          printf("Message %d received: TOPIC = \"%s\", MESSAGE = \"%s\"\n", message_count + 1, topic_buffer, message_buffer);
-        }
-      }
-      while (ret == NXD_MQTT_SUCCESS);
-
-      if ( ret != NXD_MQTT_NO_MESSAGE)
-      {
-        Error_Handler();
-      }
-    }
-
-
-    /* Decrement message number */
-    remaining_msg -- ;
-    message_count ++ ;
-
-    /* Delay 1s between each pub */
-    tx_thread_sleep(100);
-
-  }
-
-  /* Now unsubscribe from topic. */
-  ret = nxd_mqtt_client_unsubscribe(&MqttClient, TOPIC_NAME, STRLEN(TOPIC_NAME));
-
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  /* Disconnect from the broker. */
-  ret = nxd_mqtt_client_disconnect(&MqttClient);
-
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  /* Delete the client instance, release all the resources. */
-  ret = nxd_mqtt_client_delete(&MqttClient);
-
-  if (ret != NX_SUCCESS)
-  {
-    Error_Handler();
-  }
-
-  /* test OK -> success Handler */
-  Success_Handler();
 }
 
 static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input)
@@ -754,38 +606,147 @@ static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input)
 
   while(1)
   {
-    /* 1. Création du client à chaque tour pour garantir un état propre (READY) */
-    ret = nx_http_client_create(&HttpClient, "HTTP Client", &IpInstance, &AppPool, 2048);
-    if (ret != NX_SUCCESS) {
-        printf("Erreur création client: 0x%02x\n", ret);
-        tx_thread_sleep(100);
-        continue;
-    }
+	  /* 1. Création du client propre */
+	      nx_http_client_create(&HttpClient, "HTTP Client", &IpInstance, &AppPool, 2048);
+	      nx_http_client_set_connect_port(&HttpClient, 8000);
 
-    nx_http_client_set_connect_port(&HttpClient, 8000);
+	      /* 2. Appel de l'échange Diffie-Hellman */
+	      Performance_ECDH_Exchange();
 
-    printf("\nEnvoi requête GET...\n");
-    ret = nxd_http_client_get_start(&HttpClient, &server_ip, "/", NX_NULL, 0, NX_NULL, NX_NULL, TX_WAIT_FOREVER);
+	      /* 3. Cleanup */
+	      nx_http_client_delete(&HttpClient);
 
-    if (ret == NX_SUCCESS)
-    {
-        ret = nx_http_client_get_packet(&HttpClient, &response_packet, 1000);
-        if (ret == NX_SUCCESS)
-        {
-        	printf("Contenu : %s\n", response_packet->nx_packet_prepend_ptr);
-        	nx_packet_release(response_packet);
+	      tx_thread_sleep(1000); // 10 secondes entre chaque test
+	      //if exchange valid => main loop collection and sent with cypher
+  }
+}
+
+/**
+ * @brief Génère la clé STSAFE et l'envoie via HTTP POST
+ */
+// 1. Ajoute ce prototype en haut du fichier pour supprimer le warning Success_Handler
+void Success_Handler(void);
+
+UINT Performance_ECDH_Exchange(VOID)
+{
+    UINT ret;
+    NXD_ADDRESS server_ip;
+    NX_PACKET *send_packet;
+    NX_PACKET *response_packet;
+    NX_TCP_SOCKET tcp_socket;
+
+    /* Variables STSAFE */
+    uint8_t point_rep;
+    StSafeA_LVBuffer_t pubX, pubY;
+    uint8_t dataX[32], dataY[32];
+
+    char json_payload[512];
+    char pub_key_hex[135];
+    char http_request[1024];
+
+    char server_pub_key_hex[135];
+
+    server_ip.nxd_ip_version = NX_IP_VERSION_V4;
+    server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
+
+    /* --- ÉTAPE 1 : GÉNÉRATION STSAFE (Boucle infinie jusqu'au succès) --- */
+    pubX.Length = 32; pubX.Data = dataX;
+    pubY.Length = 32; pubY.Data = dataY;
+
+    while(1) {
+        ret = StSafeA_GenerateKeyPair(&stsafea_handle, STSAFEA_KEY_SLOT_1, 0xFFFF, 0,
+                (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN | STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN),
+                (StSafeA_CurveId_t)0, 32, &point_rep, &pubX, &pubY, 0);
+
+        if (ret == STSAFEA_OK) {
+            printf("STSAFE: KeyPair OK\n");
+            break;
+        } else {
+            printf("STSAFE Error 0x%02X... retry in 2s\n", ret);
+            tx_thread_sleep(200);
         }
     }
-    else
-    {
-        printf("Erreur GET: 0x%02x\n", ret);
+
+    /* --- ÉTAPE 2 : PRÉPARATION DU PAYLOAD --- */
+    sprintf(&pub_key_hex[0], "04");
+    for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2) + 2], "%02X", dataX[i]);
+    for(int i=0; i<32; i++) sprintf(&pub_key_hex[66 + (i*2)], "%02X", dataY[i]);
+
+    snprintf(json_payload, sizeof(json_payload),
+             "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}",
+             pub_key_hex);
+
+    /* --- ÉTAPE 3 : BOUCLE DE CONNEXION ET ENVOI --- */
+    int request_len = snprintf(http_request, sizeof(http_request),
+        "PUT /exchange/ecdh HTTP/1.1\r\n"
+        "Host: 144.24.206.188:8000\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        (int)strlen(json_payload), json_payload);
+
+    while(1) {
+        printf("Tentative Connexion TCP (Port 8000)...\n");
+
+        // Création socket
+        ret = nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW",
+                                   NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192,
+                                   NX_NULL, NX_NULL);
+
+        if (ret == NX_SUCCESS) {
+            nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
+
+            // Connexion au serveur
+            ret = nxd_tcp_client_socket_connect(&tcp_socket, &server_ip, 8000, 1000);
+
+            if (ret == NX_SUCCESS) {
+                printf("Connecté ! Envoi HTTP PUT...\n");
+
+                if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
+                    nx_packet_data_append(send_packet, http_request, request_len, &AppPool, TX_WAIT_FOREVER);
+
+                    ret = nx_tcp_socket_send(&tcp_socket, send_packet, 1000);
+
+                    if (ret == NX_SUCCESS) {
+                        // Pointeur vers le début des données utiles dans le paquet
+                        char *data_ptr = (char *)response_packet->nx_packet_prepend_ptr;
+                        uint32_t data_len = response_packet->nx_packet_length;
+
+                        // 1. On cherche la clé JSON "server_public_key_hex"
+                        char *key_start = strstr(data_ptr, "server_public_key_hex\":\"");
+
+                        if (key_start != NULL) {
+                            // On se déplace juste après le :" pour arriver au début de la valeur
+                            key_start += strlen("server_public_key_hex\":\"");
+
+                            // 2. On copie les 130 caractères de la clé
+                            // (04 + 64 hex X + 64 hex Y)
+                            memcpy(server_pub_key_hex, key_start, 130);
+                            server_pub_key_hex[130] = '\0'; // Fin de chaîne
+
+                            printf("CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
+
+                            // C'est ici que tu pourras appeler StSafeA_ComputeSharedSecret
+                        } else {
+                            printf("Erreur : Champ server_public_key_hex non trouvé dans la réponse\n");
+                        }
+
+                        nx_packet_release(response_packet);
+                    } else {
+                        nx_packet_release(send_packet);
+                    }
+                }
+            }
+        }
+
+        // Si échec, on nettoie la socket et on recommence
+        printf("Erreur réseau (0x%02X). Retry in 5s...\n", ret);
+        nx_tcp_socket_disconnect(&tcp_socket, 100);
+        nx_tcp_client_socket_unbind(&tcp_socket);
+        nx_tcp_socket_delete(&tcp_socket);
+        tx_thread_sleep(500);
     }
-
-    /* 2. Suppression du client pour libérer la socket TCP interne */
-    /* C'est l'équivalent d'un disconnect + cleanup dans cette version */
-    nx_http_client_delete(&HttpClient);
-
-    tx_thread_sleep(500); // Pause avant la prochaine tentative
-  }
 }
 /* USER CODE END 1 */

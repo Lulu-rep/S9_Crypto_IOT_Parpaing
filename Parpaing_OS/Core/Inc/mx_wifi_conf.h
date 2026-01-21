@@ -102,7 +102,7 @@ int32_t mxwifi_probe(void **ll_drv_context);
 #define MX_WIFI_SOCKET_DATA_SIZE                    ((MX_WIFI_IPC_PAYLOAD_SIZE)-12) /* MX_WIFI_IPC_PAYLOAD_SIZE - socket_api_params_header */
 
 #ifndef MX_WIFI_CMD_TIMEOUT
-#define MX_WIFI_CMD_TIMEOUT                         (20000)
+#define MX_WIFI_CMD_TIMEOUT                         (2000)
 #endif
 #define MX_WIFI_MAX_SOCKET_NBR                      (8)
 #define MX_WIFI_MAX_DETECTED_AP                     (10)

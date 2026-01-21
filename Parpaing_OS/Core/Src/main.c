@@ -182,12 +182,7 @@ int main(void)
 
   if (res == STSAFEA_OK)
   {
-      printf("Cle ECC generee avec succes !\r\n");
-      printf("Public Key X: ");
-      for(int i=0; i<32; i++) printf("%02X", pubX.Data[i]);  // CORRECTION: .Data au lieu de .pData
-      printf("\r\nPublic Key Y: ");
-      for(int i=0; i<32; i++) printf("%02X", pubY.Data[i]);  // CORRECTION: .Data au lieu de .pData
-      printf("\r\n");
+      printf("Cle test ECC generee avec succes !\r\n");
   }
   else
   {
@@ -412,7 +407,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
