@@ -631,122 +631,131 @@ UINT Performance_ECDH_Exchange(VOID)
 {
     UINT ret;
     NXD_ADDRESS server_ip;
-    NX_PACKET *send_packet;
-    NX_PACKET *response_packet;
+    NX_PACKET *send_packet = NX_NULL;
+    NX_PACKET *response_packet = NX_NULL;
     NX_TCP_SOCKET tcp_socket;
 
-    /* Variables STSAFE */
-    uint8_t point_rep;
-    StSafeA_LVBuffer_t pubX, pubY;
+    /* Buffers */
     uint8_t dataX[32], dataY[32];
+    StSafeA_LVBuffer_t pubX = {32, dataX}, pubY = {32, dataY};
+    uint8_t point_rep;
 
     char json_payload[512];
     char pub_key_hex[135];
-    char http_request[1024];
-
     char server_pub_key_hex[135];
+    char http_request[1024];
 
     server_ip.nxd_ip_version = NX_IP_VERSION_V4;
     server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
 
-    /* --- ÉTAPE 1 : GÉNÉRATION STSAFE (Boucle infinie jusqu'au succès) --- */
-    pubX.Length = 32; pubX.Data = dataX;
-    pubY.Length = 32; pubY.Data = dataY;
-
+    /* 1. STSAFE - Génération Paire de clés */
     while(1) {
-        ret = StSafeA_GenerateKeyPair(&stsafea_handle, STSAFEA_KEY_SLOT_1, 0xFFFF, 0,
-                (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN | STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN),
-                (StSafeA_CurveId_t)0, 32, &point_rep, &pubX, &pubY, 0);
-
-        if (ret == STSAFEA_OK) {
-            printf("STSAFE: KeyPair OK\n");
-            break;
-        } else {
-            printf("STSAFE Error 0x%02X... retry in 2s\n", ret);
-            tx_thread_sleep(200);
-        }
+        if (StSafeA_GenerateKeyPair(&stsafea_handle, STSAFEA_KEY_SLOT_1, 0xFFFF, 0, 0x0C, 0, 32, &point_rep, &pubX, &pubY, 0) == STSAFEA_OK) break;
+        tx_thread_sleep(100);
     }
 
-    /* --- ÉTAPE 2 : PRÉPARATION DU PAYLOAD --- */
-    sprintf(&pub_key_hex[0], "04");
-    for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2) + 2], "%02X", dataX[i]);
-    for(int i=0; i<32; i++) sprintf(&pub_key_hex[66 + (i*2)], "%02X", dataY[i]);
+    /* 2. Formatage JSON */
+    sprintf(pub_key_hex, "04");
+    for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2)+2], "%02X", dataX[i]);
+    for(int i=0; i<32; i++) sprintf(&pub_key_hex[66+(i*2)], "%02X", dataY[i]);
 
-    snprintf(json_payload, sizeof(json_payload),
-             "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}",
-             pub_key_hex);
+    snprintf(json_payload, sizeof(json_payload), "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}", pub_key_hex);
 
-    /* --- ÉTAPE 3 : BOUCLE DE CONNEXION ET ENVOI --- */
-    int request_len = snprintf(http_request, sizeof(http_request),
-        "PUT /exchange/ecdh HTTP/1.1\r\n"
-        "Host: 144.24.206.188:8000\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
+    /* 3. Construction Requête HTTP */
+    int req_len = snprintf(http_request, sizeof(http_request),
+        "PUT /exchange/ecdh HTTP/1.1\r\nHost: 144.24.206.188:8000\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
         (int)strlen(json_payload), json_payload);
 
-    while(1) {
-        printf("Tentative Connexion TCP (Port 8000)...\n");
+    /* 4. Connexion & Envoi */
+    nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW", NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192, NX_NULL, NX_NULL);
+    nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
 
-        // Création socket
-        ret = nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW",
-                                   NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192,
-                                   NX_NULL, NX_NULL);
-
-        if (ret == NX_SUCCESS) {
-            nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
-
-            // Connexion au serveur
-            ret = nxd_tcp_client_socket_connect(&tcp_socket, &server_ip, 8000, 1000);
-
-            if (ret == NX_SUCCESS) {
-                printf("Connecté ! Envoi HTTP PUT...\n");
-
-                if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
-                    nx_packet_data_append(send_packet, http_request, request_len, &AppPool, TX_WAIT_FOREVER);
-
-                    ret = nx_tcp_socket_send(&tcp_socket, send_packet, 1000);
-
-                    if (ret == NX_SUCCESS) {
-                        // Pointeur vers le début des données utiles dans le paquet
-                        char *data_ptr = (char *)response_packet->nx_packet_prepend_ptr;
-                        uint32_t data_len = response_packet->nx_packet_length;
-
-                        // 1. On cherche la clé JSON "server_public_key_hex"
-                        char *key_start = strstr(data_ptr, "server_public_key_hex\":\"");
-
-                        if (key_start != NULL) {
-                            // On se déplace juste après le :" pour arriver au début de la valeur
-                            key_start += strlen("server_public_key_hex\":\"");
-
-                            // 2. On copie les 130 caractères de la clé
-                            // (04 + 64 hex X + 64 hex Y)
-                            memcpy(server_pub_key_hex, key_start, 130);
-                            server_pub_key_hex[130] = '\0'; // Fin de chaîne
-
-                            printf("CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
-
-                            // C'est ici que tu pourras appeler StSafeA_ComputeSharedSecret
-                        } else {
-                            printf("Erreur : Champ server_public_key_hex non trouvé dans la réponse\n");
-                        }
-
-                        nx_packet_release(response_packet);
-                    } else {
-                        nx_packet_release(send_packet);
-                    }
-                }
-            }
+    ret = nxd_tcp_client_socket_connect(&tcp_socket, &server_ip, 8000, 500);
+    if (ret == NX_SUCCESS) {
+        if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
+            nx_packet_data_append(send_packet, http_request, req_len, &AppPool, TX_WAIT_FOREVER);
+            nx_tcp_socket_send(&tcp_socket, send_packet, 500);
         }
 
-        // Si échec, on nettoie la socket et on recommence
-        printf("Erreur réseau (0x%02X). Retry in 5s...\n", ret);
-        nx_tcp_socket_disconnect(&tcp_socket, 100);
-        nx_tcp_client_socket_unbind(&tcp_socket);
-        nx_tcp_socket_delete(&tcp_socket);
-        tx_thread_sleep(500);
+        // --- LECTURE MULTI-PAQUETS ---
+        int key_found = 0;
+        while (nx_tcp_socket_receive(&tcp_socket, &response_packet, 500) == NX_SUCCESS) {
+            char *data = (char *)response_packet->nx_packet_prepend_ptr;
+            ULONG len = response_packet->nx_packet_length;
+
+            printf("PAQUET RECU (%lu octets)\n", len);
+
+            char *token = "server_public_key_hex\":\"";
+            char *found = strstr(data, token);
+
+            if (found != NULL) {
+                found += strlen(token);
+                memcpy(server_pub_key_hex, found, 130);
+                server_pub_key_hex[130] = '\0';
+                printf(">>> CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
+                key_found = 1;
+            }
+            nx_packet_release(response_packet);
+            if (key_found) break;
+        }
+
+        if (key_found) {
+			/* --- 5. CALCUL DU SECRET --- */
+			uint8_t srvX[32], srvY[32];
+			StSafeA_LVBuffer_t srvX_lv = {32, srvX}, srvY_lv = {32, srvY};
+			StSafeA_SharedSecretBuffer_t shared_out;
+			uint8_t shared_secret[32];
+
+			// 1. Conversion hex -> bin rigoureuse
+			// Note : Ton sscanf utilisait %02lx (long). Utilisons une méthode plus sûre.
+			for (int i = 0; i < 32; i++) {
+				unsigned int valX, valY;
+				// On saute le "04" (2 chars). X commence à l'index 2, Y à l'index 66
+				sscanf(&server_pub_key_hex[2 + (i * 2)], "%02x", &valX);
+				sscanf(&server_pub_key_hex[66 + (i * 2)], "%02x", &valY);
+				srvX[i] = (uint8_t)valX;
+				srvY[i] = (uint8_t)valY;
+			}
+
+			// 2. Initialisation structure de sortie
+			// Vérifie bien dans stsafea_core.h si c'est pData ou SharedKey.Data
+			shared_out.Length = 32;
+			shared_out.SharedKey.Data = shared_secret;
+
+			printf("Tentative EstablishKey sur Slot 1...\n");
+
+			// 3. Appel avec cast explicite si nécessaire
+			ret = StSafeA_EstablishKey(&stsafea_handle,
+									   STSAFEA_KEY_SLOT_1,
+									   (const StSafeA_LVBuffer_t *)&srvX_lv,
+									   (const StSafeA_LVBuffer_t *)&srvY_lv,
+									   32,
+									   &shared_out,
+									   STSAFEA_MAC_NONE, // Utilise la constante si définie
+									   0);
+
+			if (ret == STSAFEA_OK) {
+				printf(">>> SHARED SECRET CALCULÉ AVEC SUCCÈS !\nSECRET: ");
+				for(int i=0; i<32; i++) printf("%02X", shared_secret[i]);
+				printf("\n");
+			} else {
+				// Si tu as encore 0x11, c'est que le point X/Y envoyé par le serveur
+				// n'est pas reconnu comme valide par le STSAFE.
+				printf("Erreur STSAFE EstablishKey: 0x%02X\n", ret);
+			}
+
+			/* Nettoyage Socket */
+			nx_tcp_socket_disconnect(&tcp_socket, 100);
+			nx_tcp_client_socket_unbind(&tcp_socket);
+			nx_tcp_socket_delete(&tcp_socket);
+			return (ret == STSAFEA_OK) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
+        }
     }
+
+    // Nettoyage en cas d'erreur
+    nx_tcp_socket_disconnect(&tcp_socket, 100);
+    nx_tcp_client_socket_unbind(&tcp_socket);
+    nx_tcp_socket_delete(&tcp_socket);
+    return ret;
 }
 /* USER CODE END 1 */
