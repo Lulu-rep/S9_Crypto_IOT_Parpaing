@@ -35,11 +35,22 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/ecdh.h"
 #include "mbedtls/error.h"
-
+#include "mbedtls/md.h"
+#include "mbedtls/gcm.h"
+#include "mbedtls/cipher.h"
+#include "mbedtls/hkdf.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+/* Variables pour la session de données */
+static uint8_t session_aes_key[32];
+static uint8_t is_key_established = 0;
+
+/* Définitions pour le capteur VEML6030 */
+#define VEML6030_ADDR (0x10 << 1) // Adresse I2C 7 bits décalée
+#define VEML6030_REG_ALS_DATA 0x04
+
 extern RNG_HandleTypeDef hrng;
 
 extern StSafeA_Handle_t stsafea_handle;
@@ -69,9 +80,7 @@ ULONG mqtt_client_stack[MQTT_CLIENT_STACK_SIZE];
 TX_EVENT_FLAGS_GROUP mqtt_app_flag;
 
 /* Declare buffers to hold message and topic. */
-static char message[NXD_MQTT_MAX_MESSAGE_LENGTH];
-static UCHAR message_buffer[NXD_MQTT_MAX_MESSAGE_LENGTH];
-static UCHAR topic_buffer[NXD_MQTT_MAX_TOPIC_NAME_LENGTH];
+
 
 /* TLS buffers and certificate containers. */
 extern const NX_SECURE_TLS_CRYPTO nx_crypto_tls_ciphers;
@@ -101,7 +110,6 @@ ULONG                    current_time;
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
 static VOID App_Main_Thread_Entry(ULONG thread_input);
-static VOID App_MQTT_Client_Thread_Entry(ULONG thread_input);
 static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input);
 static VOID App_SNTP_Thread_Entry(ULONG thread_input);
 static VOID ip_address_change_notify_callback(NX_IP *ip_instance, VOID *ptr);
@@ -109,6 +117,8 @@ static VOID time_update_callback(NX_SNTP_TIME_MESSAGE *time_update_ptr, NX_SNTP_
 static ULONG nx_secure_tls_session_time_function(void);
 static UINT dns_create(NX_DNS *dns_ptr);
 static UINT Performance_ECDH_Exchange(VOID);
+void Send_HTTP_PUT(NXD_ADDRESS ip, char* path, char* json);
+
 
 /* USER CODE END PFP */
 
@@ -399,23 +409,6 @@ static VOID App_Main_Thread_Entry(ULONG thread_input)
   return;
 }
 
-/* Declare the disconnect notify function. */
-static VOID my_disconnect_func(NXD_MQTT_CLIENT *client_ptr)
-{
-  NX_PARAMETER_NOT_USED(client_ptr);
-
-  printf("client disconnected from broker < %s >.\n", MQTT_BROKER_NAME);
-}
-
-/* Declare the notify function. */
-static VOID my_notify_func(NXD_MQTT_CLIENT* client_ptr, UINT number_of_messages)
-{
-  NX_PARAMETER_NOT_USED(client_ptr);
-  NX_PARAMETER_NOT_USED(number_of_messages);
-
-  tx_event_flags_set(&mqtt_app_flag, DEMO_MESSAGE_EVENT, TX_OR);
-  return;
-}
 
 /**
 * @brief  message generation Function.
@@ -626,6 +619,11 @@ static VOID App_HTTP_Get_Thread_Entry(ULONG thread_input)
   }
 }
 
+int dummy_entropy_func(void *data, unsigned char *output, size_t len) {
+    memset(output, 0x42, len); // Remplit de données fixes
+    return 0;
+}
+
 /**
  * @brief Génère la clé STSAFE et l'envoie via HTTP POST
  */
@@ -640,146 +638,197 @@ UINT Performance_ECDH_Exchange(VOID)
     NX_PACKET *response_packet = NX_NULL;
     NX_TCP_SOCKET tcp_socket;
 
-    /* Buffers pour les clés */
+    /* Buffers et structures */
     uint8_t dataX[32], dataY[32];
+    uint8_t shared_secret_bin[32]; // Déclaré ici pour être visible partout dans la fonction
     char json_payload[512];
     char pub_key_hex[135];
     char server_pub_key_hex[135];
     char http_request[1024];
 
-    /* Structures mbedTLS */
     mbedtls_ecp_keypair client_key;
-    mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
+    const unsigned char custom_seed[] = "PARPAING_OS_FIXED_SEED_012345";
 
+    /* Initialisations */
     mbedtls_ecp_keypair_init(&client_key);
     mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_entropy_init(&entropy);
 
     server_ip.nxd_ip_version = NX_IP_VERSION_V4;
     server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
 
-    /* --- 1. GÉNÉRATION PAIRE DE CLÉS VIA MBEDTLS (AU LIEU DE STSAFE) --- */
-    printf("Simulation: Génération des clés via mbedTLS...\n");
+    /* 1. Seed DRBG */
+    int mbed_ret = mbedtls_ctr_drbg_seed(&ctr_drbg, dummy_entropy_func, NULL, custom_seed, sizeof(custom_seed));
+    if (mbed_ret != 0) return NX_NOT_SUCCESSFUL;
 
-    // Initialisation du générateur aléatoire
-    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, (const uint8_t *)"STM32", 5);
+    /* 2. Génération clés */
+    printf("Génération des clés...\n");
+    mbed_ret = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, &client_key, mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (mbed_ret != 0) goto cleanup;
 
-    // Génération de la paire NIST-P256 logicielle
-    int mbed_ret = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, &client_key, mbedtls_ctr_drbg_random, &ctr_drbg);
-
-    if (mbed_ret != 0) {
-        printf("Erreur mbedTLS GenKey: -0x%04X\n", -mbed_ret);
-        return NX_NOT_SUCCESSFUL;
-    }
-
-    // Extraction des coordonnées X et Y pour le JSON
     mbedtls_mpi_write_binary(&(client_key.Q.X), dataX, 32);
     mbedtls_mpi_write_binary(&(client_key.Q.Y), dataY, 32);
 
-    /* --- 2. FORMATAGE JSON --- */
+    /* 3. Formatage & Envoi */
     sprintf(pub_key_hex, "04");
     for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2)+2], "%02X", dataX[i]);
     for(int i=0; i<32; i++) sprintf(&pub_key_hex[66+(i*2)], "%02X", dataY[i]);
 
     snprintf(json_payload, sizeof(json_payload), "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}", pub_key_hex);
 
-    /* --- 3. CONSTRUCTION REQUÊTE HTTP --- */
     int req_len = snprintf(http_request, sizeof(http_request),
         "PUT /exchange/ecdh HTTP/1.1\r\nHost: 144.24.206.188:8000\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
         (int)strlen(json_payload), json_payload);
 
-    /* --- 4. CONNEXION & ENVOI --- */
     nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW", NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192, NX_NULL, NX_NULL);
     nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
 
     ret = nxd_tcp_client_socket_connect(&tcp_socket, &server_ip, 8000, 500);
-    if (ret == NX_SUCCESS) {
-        if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
-            nx_packet_data_append(send_packet, http_request, req_len, &AppPool, TX_WAIT_FOREVER);
-            nx_tcp_socket_send(&tcp_socket, send_packet, 500);
+    if (ret != NX_SUCCESS) goto cleanup;
+
+    if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
+        nx_packet_data_append(send_packet, http_request, req_len, &AppPool, TX_WAIT_FOREVER);
+        nx_tcp_socket_send(&tcp_socket, send_packet, 500);
+    }
+
+    /* 4. Réception clé serveur */
+    int key_found = 0;
+    while (nx_tcp_socket_receive(&tcp_socket, &response_packet, 500) == NX_SUCCESS) {
+        char *data = (char *)response_packet->nx_packet_prepend_ptr;
+        char *token = "server_public_key_hex\":\"";
+        char *found = strstr(data, token);
+        if (found != NULL) {
+            found += strlen(token);
+            memcpy(server_pub_key_hex, found, 128);
+            server_pub_key_hex[128] = '\0';
+            key_found = 1;
+        }
+        nx_packet_release(response_packet);
+        if (key_found) break;
+    }
+
+    /* 5. Calcul Secret */
+    if (key_found) {
+        uint8_t srvX[32], srvY[32];
+        mbedtls_ecp_keypair server_pub_key;
+        mbedtls_mpi z;
+        mbedtls_ecp_keypair_init(&server_pub_key);
+        mbedtls_mpi_init(&z);
+        mbedtls_ecp_group_load(&(server_pub_key.grp), MBEDTLS_ECP_DP_SECP256R1);
+
+        for (int i = 0; i < 32; i++) {
+            unsigned int valX, valY;
+            sscanf(&server_pub_key_hex[i * 2], "%02x", &valX);
+            sscanf(&server_pub_key_hex[64 + (i * 2)], "%02x", &valY);
+            srvX[i] = (uint8_t)valX; srvY[i] = (uint8_t)valY;
         }
 
-        int key_found = 0;
-        while (nx_tcp_socket_receive(&tcp_socket, &response_packet, 500) == NX_SUCCESS) {
-            char *data = (char *)response_packet->nx_packet_prepend_ptr;
-            char *token = "server_public_key_hex\":\"";
-            char *found = strstr(data, token);
+        mbedtls_mpi_read_binary(&(server_pub_key.Q.X), srvX, 32);
+        mbedtls_mpi_read_binary(&(server_pub_key.Q.Y), srvY, 32);
+        mbedtls_mpi_lset(&(server_pub_key.Q.Z), 1);
 
-            if (found != NULL) {
-                found += strlen(token);
-                memcpy(server_pub_key_hex, found, 128);
-                server_pub_key_hex[128] = '\0';
-                printf(">>> CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
-                key_found = 1;
+        mbed_ret = mbedtls_ecdh_compute_shared(&(client_key.grp), &z, &(server_pub_key.Q), &(client_key.d), mbedtls_ctr_drbg_random, &ctr_drbg);
+        if (mbed_ret == 0) {
+            mbedtls_mpi_write_binary(&z, shared_secret_bin, 32);
+        }
+        mbedtls_ecp_keypair_free(&server_pub_key);
+        mbedtls_mpi_free(&z);
+    }
+
+    /* 6. KDF : HKDF-SHA-256 (Match Python Server) */
+        if (mbed_ret == 0 && key_found) {
+            const unsigned char *info = (const unsigned char *) "handshake data";
+            size_t info_len = strlen((char *)info);
+
+            // On utilise mbedtls_hkdf qui combine extract et expand
+            // Salt = NULL (comme en Python), Info = "handshake data"
+            mbed_ret = mbedtls_hkdf(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                                    NULL, 0,                // Salt (None)
+                                    shared_secret_bin, 32,  // Input Key Material
+                                    info, info_len,         // Info string
+                                    session_aes_key, 16);   // Output: 16 octets (AES-128)
+
+            if (mbed_ret != 0) {
+                printf("Erreur HKDF: -0x%04X\n", -mbed_ret);
+                goto cleanup;
             }
-            nx_packet_release(response_packet);
-            if (key_found) break;
-        }
 
-        if (key_found) {
-			uint8_t srvX[32], srvY[32], shared_secret_bin[32];
-			mbedtls_ecp_keypair server_pub_key;
-			mbedtls_mpi z; // Le secret partagé sous forme mathématique (MPI)
+            is_key_established = 1;
+            printf(">>> SESSION ETABLIE (HKDF OK). TRANSMISSION LUX...\n");
 
-			mbedtls_ecp_keypair_init(&server_pub_key);
-			mbedtls_mpi_init(&z);
-
-			mbedtls_ecp_group_load(&(server_pub_key.grp), MBEDTLS_ECP_DP_SECP256R1);
-
-			// 1. Conversion Hex -> Bin du serveur
-			for (int i = 0; i < 32; i++) {
-				unsigned int valX, valY;
-				sscanf(&server_pub_key_hex[i * 2], "%02x", &valX);
-				sscanf(&server_pub_key_hex[64 + (i * 2)], "%02x", &valY);
-				srvX[i] = (uint8_t)valX;
-				srvY[i] = (uint8_t)valY;
-			}
-
-			// 2. Charger les points du serveur
-			mbedtls_mpi_read_binary(&(server_pub_key.Q.X), srvX, 32);
-			mbedtls_mpi_read_binary(&(server_pub_key.Q.Y), srvY, 32);
-			mbedtls_mpi_lset(&(server_pub_key.Q.Z), 1);
-
-			// 3. Calcul du secret partagé (Format MPI)
-			// L'ordre des arguments pour votre version : (group, z, Q_server, d_client, f_rng, p_rng)
-			mbed_ret = mbedtls_ecdh_compute_shared(&(client_key.grp), &z,
-												   &(server_pub_key.Q), &(client_key.d),
-												   mbedtls_ctr_drbg_random, &ctr_drbg);
-
-			if (mbed_ret == 0) {
-				// 4. Conversion du MPI en buffer d'octets utilisable
-				mbedtls_mpi_write_binary(&z, shared_secret_bin, 32);
-
-				printf(">>> VICTOIRE ! SHARED SECRET LOGICIEL CALCULÉ\n");
-				printf("SECRET: ");
-				for(int i=0; i<32; i++) printf("%02X", shared_secret_bin[i]);
-				printf("\n");
-			} else {
-				printf("Erreur mbedTLS ECDH: -0x%04X\n", -mbed_ret);
-			}
-
-            // Nettoyage mbedTLS
-            mbedtls_ecp_keypair_free(&client_key);
-            mbedtls_ecp_keypair_free(&server_pub_key);
-            mbedtls_entropy_free(&entropy);
-            mbedtls_ctr_drbg_free(&ctr_drbg);
-
+            // Fermeture de la socket d'échange avant d'entrer dans la boucle
             nx_tcp_socket_disconnect(&tcp_socket, 100);
             nx_tcp_client_socket_unbind(&tcp_socket);
             nx_tcp_socket_delete(&tcp_socket);
-            return (mbed_ret == 0) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
-        }
-    }
 
-    /* Nettoyage final */
+            while (is_key_established) {
+                uint8_t buffer_i2c[2];
+                if (HAL_I2C_Mem_Read(&hi2c2, VEML6030_ADDR, VEML6030_REG_ALS_DATA, 1, buffer_i2c, 2, 100) == HAL_OK) {
+                    uint16_t raw_als = ((uint16_t)buffer_i2c[1] << 8) | buffer_i2c[0];
+                    float lux = (float)raw_als * 0.0576f;
+
+                    mbedtls_gcm_context gcm_ctx;
+                    uint8_t nonce[12] = {0};
+                    uint8_t ciphertext[64], tag[16];
+                    char plaintext[64], final_json[1024], cipher_hex[160] = {0}, nonce_hex[25] = {0};
+
+                    int p_len = snprintf(plaintext, sizeof(plaintext), "{\"lux\":%.2f}", lux);
+
+                    mbedtls_gcm_init(&gcm_ctx);
+
+                    // IMPORTANT: On utilise 128 bits ici car HKDF a généré 16 octets
+                    mbedtls_gcm_setkey(&gcm_ctx, MBEDTLS_CIPHER_ID_AES, session_aes_key, 128);
+
+                    mbedtls_gcm_crypt_and_tag(&gcm_ctx, MBEDTLS_GCM_ENCRYPT, p_len,
+                                              nonce, 12, NULL, 0,
+                                              (uint8_t*)plaintext, ciphertext, 16, tag);
+
+                    // Formatage Hexadécimal (Minuscules pour coller aux standards Web/Python)
+                    for(int i=0; i<p_len; i++) sprintf(&cipher_hex[i*2], "%02x", ciphertext[i]);
+                    for(int i=0; i<16; i++) sprintf(&cipher_hex[(p_len+i)*2], "%02x", tag[i]);
+                    for(int i=0; i<12; i++) sprintf(&nonce_hex[i*2], "%02x", nonce[i]);
+
+                    snprintf(final_json, sizeof(final_json),
+                             "{\"client_id\":\"Pierre_STM32\",\"nonce\":\"%s\",\"ciphertext\":\"%s\"}",
+                             nonce_hex, cipher_hex);
+
+                    Send_HTTP_PUT(server_ip, "/message", final_json);
+                    mbedtls_gcm_free(&gcm_ctx);
+                }
+                tx_thread_sleep(200);
+            }
+        }
+
+cleanup:
     mbedtls_ecp_keypair_free(&client_key);
-    mbedtls_entropy_free(&entropy);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     nx_tcp_socket_disconnect(&tcp_socket, 100);
     nx_tcp_client_socket_unbind(&tcp_socket);
     nx_tcp_socket_delete(&tcp_socket);
-    return ret;
+    return (mbed_ret == 0) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
+}
+
+void Send_HTTP_PUT(NXD_ADDRESS ip, char* path, char* json) {
+    NX_TCP_SOCKET sock;
+    NX_PACKET *p;
+    char req[1200];
+
+    nx_tcp_socket_create(&IpInstance, &sock, "TCP HTTP", NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192, NX_NULL, NX_NULL);
+    nx_tcp_client_socket_bind(&sock, NX_ANY_PORT, 100);
+
+    if (nxd_tcp_client_socket_connect(&sock, &ip, 8000, 200) == NX_SUCCESS) {
+        int len = snprintf(req, sizeof(req),
+            "PUT %s HTTP/1.1\r\nHost: 144.24.206.188\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+            path, (int)strlen(json), json);
+
+        if (nx_packet_allocate(&AppPool, &p, NX_TCP_PACKET, 100) == NX_SUCCESS) {
+            nx_packet_data_append(p, req, len, &AppPool, 100);
+            nx_tcp_socket_send(&sock, p, 100);
+        }
+    }
+    nx_tcp_socket_disconnect(&sock, 100);
+    nx_tcp_client_socket_unbind(&sock);
+    nx_tcp_socket_delete(&sock);
 }
 
 //UINT Performance_ECDH_Exchange(VOID)

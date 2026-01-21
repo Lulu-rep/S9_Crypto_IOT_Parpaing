@@ -83,7 +83,6 @@ StSafeA_Handle_t stsafea_handle;
 uint8_t stsafe_rx_tx_buffer[512]; // Taille standard pour les échanges I2C
 
 
-
 /* USER CODE END 0 */
 
 /**
@@ -132,7 +131,7 @@ int main(void)
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_11, GPIO_PIN_RESET);
   HAL_Delay(100);
   StSafeA_ResponseCode_t res = StSafeA_Init(&stsafea_handle, stsafe_rx_tx_buffer);
-
+// On dit au middleware d'utiliser ces clés pour signer les commandes
 //  if (res == STSAFEA_OK)
 //  {
 //      StSafeA_ProductDataBuffer_t product_info;
@@ -153,41 +152,41 @@ int main(void)
 //          printf("Erreur Query: %02X\r\n", res);
 //      }
 //  }
-
-  uint8_t point_rep;
-  StSafeA_LVBuffer_t pubX, pubY;
-  uint8_t dataX[32], dataY[32];
-
-
-  pubX.Length = 32;
-  pubX.Data  = dataX;
-  pubY.Length = 32;
-  pubY.Data  = dataY;
+//
+//  uint8_t point_rep;
+//  StSafeA_LVBuffer_t pubX, pubY;
+//  uint8_t dataX[32], dataY[32];
+//
+//
+//  pubX.Length = 32;
+//  pubX.Data  = dataX;
+//  pubY.Length = 32;
+//  pubY.Data  = dataY;
 
   /* Appel conforme au prototype */
-  res = StSafeA_GenerateKeyPair(
-      &stsafea_handle,
-      STSAFEA_KEY_SLOT_1,
-      0xFFFF,
-      0,
-      (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN |
-       STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN), // InAuthorizationFlags
-	   (StSafeA_CurveId_t)0,  // CORRECTION: Utiliser le bon nom de constante
-      32,                          // InPubXYLen
-      &point_rep,                  // pOutPointReprensentationId
-      &pubX,                       // pOutPubX
-      &pubY,                       // pOutPubY
-      0                            // InMAC (Pas d'authentification MAC)
-  );
-
-  if (res == STSAFEA_OK)
-  {
-      printf("Cle test ECC generee avec succes !\r\n");
-  }
-  else
-  {
-      printf("Erreur Generation Cle: %02X\r\n", res);
-  }
+//  res = StSafeA_GenerateKeyPair(
+//      &stsafea_handle,
+//      STSAFEA_KEY_SLOT_1,
+//      0xFFFF,
+//      0,
+//      (STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN |
+//       STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN), // InAuthorizationFlags
+//	   (StSafeA_CurveId_t)0,  // CORRECTION: Utiliser le bon nom de constante
+//      32,                          // InPubXYLen
+//      &point_rep,                  // pOutPointReprensentationId
+//      &pubX,                       // pOutPubX
+//      &pubY,                       // pOutPubY
+//      0                            // InMAC (Pas d'authentification MAC)
+//  );
+//
+//  if (res == STSAFEA_OK)
+//  {
+//      printf("Cle test ECC generee avec succes !\r\n");
+//  }
+//  else
+//  {
+//      printf("Erreur Generation Cle: %02X\r\n", res);
+//  }
 
   // Register 0x00 (Configuration)
     // Data: 0x0000 (ALS Gain x1, Integration Time 100ms, ALS Power ON)
