@@ -30,6 +30,11 @@
 #include "nx_http_client.h"
 #include "stsafea_core.h"
 #include "stsafea_service.h"
+#include "mbedtls/ecp.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/ecdh.h"
+#include "mbedtls/error.h"
 
 /* USER CODE END Includes */
 
@@ -635,38 +640,56 @@ UINT Performance_ECDH_Exchange(VOID)
     NX_PACKET *response_packet = NX_NULL;
     NX_TCP_SOCKET tcp_socket;
 
-    /* Buffers */
+    /* Buffers pour les clés */
     uint8_t dataX[32], dataY[32];
-    StSafeA_LVBuffer_t pubX = {32, dataX}, pubY = {32, dataY};
-    uint8_t point_rep;
-
     char json_payload[512];
     char pub_key_hex[135];
     char server_pub_key_hex[135];
     char http_request[1024];
 
+    /* Structures mbedTLS */
+    mbedtls_ecp_keypair client_key;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+
+    mbedtls_ecp_keypair_init(&client_key);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_entropy_init(&entropy);
+
     server_ip.nxd_ip_version = NX_IP_VERSION_V4;
     server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
 
-    /* 1. STSAFE - Génération Paire de clés */
-    while(1) {
-        if (StSafeA_GenerateKeyPair(&stsafea_handle, STSAFEA_KEY_SLOT_1, 0xFFFF, 0, 0x0C, 0, 32, &point_rep, &pubX, &pubY, 0) == STSAFEA_OK) break;
-        tx_thread_sleep(100);
+    /* --- 1. GÉNÉRATION PAIRE DE CLÉS VIA MBEDTLS (AU LIEU DE STSAFE) --- */
+    printf("Simulation: Génération des clés via mbedTLS...\n");
+
+    // Initialisation du générateur aléatoire
+    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, (const uint8_t *)"STM32", 5);
+
+    // Génération de la paire NIST-P256 logicielle
+    int mbed_ret = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, &client_key, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+    if (mbed_ret != 0) {
+        printf("Erreur mbedTLS GenKey: -0x%04X\n", -mbed_ret);
+        return NX_NOT_SUCCESSFUL;
     }
 
-    /* 2. Formatage JSON */
+    // Extraction des coordonnées X et Y pour le JSON
+    mbedtls_mpi_write_binary(&(client_key.Q.X), dataX, 32);
+    mbedtls_mpi_write_binary(&(client_key.Q.Y), dataY, 32);
+
+    /* --- 2. FORMATAGE JSON --- */
     sprintf(pub_key_hex, "04");
     for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2)+2], "%02X", dataX[i]);
     for(int i=0; i<32; i++) sprintf(&pub_key_hex[66+(i*2)], "%02X", dataY[i]);
 
     snprintf(json_payload, sizeof(json_payload), "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}", pub_key_hex);
 
-    /* 3. Construction Requête HTTP */
+    /* --- 3. CONSTRUCTION REQUÊTE HTTP --- */
     int req_len = snprintf(http_request, sizeof(http_request),
         "PUT /exchange/ecdh HTTP/1.1\r\nHost: 144.24.206.188:8000\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
         (int)strlen(json_payload), json_payload);
 
-    /* 4. Connexion & Envoi */
+    /* --- 4. CONNEXION & ENVOI --- */
     nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW", NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192, NX_NULL, NX_NULL);
     nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
 
@@ -677,21 +700,16 @@ UINT Performance_ECDH_Exchange(VOID)
             nx_tcp_socket_send(&tcp_socket, send_packet, 500);
         }
 
-        // --- LECTURE MULTI-PAQUETS ---
         int key_found = 0;
         while (nx_tcp_socket_receive(&tcp_socket, &response_packet, 500) == NX_SUCCESS) {
             char *data = (char *)response_packet->nx_packet_prepend_ptr;
-            ULONG len = response_packet->nx_packet_length;
-
-            printf("PAQUET RECU (%lu octets)\n", len);
-
             char *token = "server_public_key_hex\":\"";
             char *found = strstr(data, token);
 
             if (found != NULL) {
                 found += strlen(token);
-                memcpy(server_pub_key_hex, found, 130);
-                server_pub_key_hex[130] = '\0';
+                memcpy(server_pub_key_hex, found, 128);
+                server_pub_key_hex[128] = '\0';
                 printf(">>> CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
                 key_found = 1;
             }
@@ -700,62 +718,215 @@ UINT Performance_ECDH_Exchange(VOID)
         }
 
         if (key_found) {
-			/* --- 5. CALCUL DU SECRET --- */
-			uint8_t srvX[32], srvY[32];
-			StSafeA_LVBuffer_t srvX_lv = {32, srvX}, srvY_lv = {32, srvY};
-			StSafeA_SharedSecretBuffer_t shared_out;
-			uint8_t shared_secret[32];
+			uint8_t srvX[32], srvY[32], shared_secret_bin[32];
+			mbedtls_ecp_keypair server_pub_key;
+			mbedtls_mpi z; // Le secret partagé sous forme mathématique (MPI)
 
-			// 1. Conversion hex -> bin rigoureuse
-			// Note : Ton sscanf utilisait %02lx (long). Utilisons une méthode plus sûre.
+			mbedtls_ecp_keypair_init(&server_pub_key);
+			mbedtls_mpi_init(&z);
+
+			mbedtls_ecp_group_load(&(server_pub_key.grp), MBEDTLS_ECP_DP_SECP256R1);
+
+			// 1. Conversion Hex -> Bin du serveur
 			for (int i = 0; i < 32; i++) {
 				unsigned int valX, valY;
-				// On saute le "04" (2 chars). X commence à l'index 2, Y à l'index 66
-				sscanf(&server_pub_key_hex[2 + (i * 2)], "%02x", &valX);
-				sscanf(&server_pub_key_hex[66 + (i * 2)], "%02x", &valY);
+				sscanf(&server_pub_key_hex[i * 2], "%02x", &valX);
+				sscanf(&server_pub_key_hex[64 + (i * 2)], "%02x", &valY);
 				srvX[i] = (uint8_t)valX;
 				srvY[i] = (uint8_t)valY;
 			}
 
-			// 2. Initialisation structure de sortie
-			// Vérifie bien dans stsafea_core.h si c'est pData ou SharedKey.Data
-			shared_out.Length = 32;
-			shared_out.SharedKey.Data = shared_secret;
+			// 2. Charger les points du serveur
+			mbedtls_mpi_read_binary(&(server_pub_key.Q.X), srvX, 32);
+			mbedtls_mpi_read_binary(&(server_pub_key.Q.Y), srvY, 32);
+			mbedtls_mpi_lset(&(server_pub_key.Q.Z), 1);
 
-			printf("Tentative EstablishKey sur Slot 1...\n");
+			// 3. Calcul du secret partagé (Format MPI)
+			// L'ordre des arguments pour votre version : (group, z, Q_server, d_client, f_rng, p_rng)
+			mbed_ret = mbedtls_ecdh_compute_shared(&(client_key.grp), &z,
+												   &(server_pub_key.Q), &(client_key.d),
+												   mbedtls_ctr_drbg_random, &ctr_drbg);
 
-			// 3. Appel avec cast explicite si nécessaire
-			ret = StSafeA_EstablishKey(&stsafea_handle,
-									   STSAFEA_KEY_SLOT_1,
-									   (const StSafeA_LVBuffer_t *)&srvX_lv,
-									   (const StSafeA_LVBuffer_t *)&srvY_lv,
-									   32,
-									   &shared_out,
-									   STSAFEA_MAC_NONE, // Utilise la constante si définie
-									   0);
+			if (mbed_ret == 0) {
+				// 4. Conversion du MPI en buffer d'octets utilisable
+				mbedtls_mpi_write_binary(&z, shared_secret_bin, 32);
 
-			if (ret == STSAFEA_OK) {
-				printf(">>> SHARED SECRET CALCULÉ AVEC SUCCÈS !\nSECRET: ");
-				for(int i=0; i<32; i++) printf("%02X", shared_secret[i]);
+				printf(">>> VICTOIRE ! SHARED SECRET LOGICIEL CALCULÉ\n");
+				printf("SECRET: ");
+				for(int i=0; i<32; i++) printf("%02X", shared_secret_bin[i]);
 				printf("\n");
 			} else {
-				// Si tu as encore 0x11, c'est que le point X/Y envoyé par le serveur
-				// n'est pas reconnu comme valide par le STSAFE.
-				printf("Erreur STSAFE EstablishKey: 0x%02X\n", ret);
+				printf("Erreur mbedTLS ECDH: -0x%04X\n", -mbed_ret);
 			}
 
-			/* Nettoyage Socket */
-			nx_tcp_socket_disconnect(&tcp_socket, 100);
-			nx_tcp_client_socket_unbind(&tcp_socket);
-			nx_tcp_socket_delete(&tcp_socket);
-			return (ret == STSAFEA_OK) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
+            // Nettoyage mbedTLS
+            mbedtls_ecp_keypair_free(&client_key);
+            mbedtls_ecp_keypair_free(&server_pub_key);
+            mbedtls_entropy_free(&entropy);
+            mbedtls_ctr_drbg_free(&ctr_drbg);
+
+            nx_tcp_socket_disconnect(&tcp_socket, 100);
+            nx_tcp_client_socket_unbind(&tcp_socket);
+            nx_tcp_socket_delete(&tcp_socket);
+            return (mbed_ret == 0) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
         }
     }
 
-    // Nettoyage en cas d'erreur
+    /* Nettoyage final */
+    mbedtls_ecp_keypair_free(&client_key);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
     nx_tcp_socket_disconnect(&tcp_socket, 100);
     nx_tcp_client_socket_unbind(&tcp_socket);
     nx_tcp_socket_delete(&tcp_socket);
     return ret;
 }
+
+//UINT Performance_ECDH_Exchange(VOID)
+//{
+//    UINT ret;
+//    NXD_ADDRESS server_ip;
+//    NX_PACKET *send_packet = NX_NULL;
+//    NX_PACKET *response_packet = NX_NULL;
+//    NX_TCP_SOCKET tcp_socket;
+//
+//    /* Buffers */
+//    uint8_t dataX[32], dataY[32];
+//    StSafeA_LVBuffer_t pubX = {32, dataX}, pubY = {32, dataY};
+//    uint8_t point_rep;
+//
+//    char json_payload[512];
+//    char pub_key_hex[135];
+//    char server_pub_key_hex[135];
+//    char http_request[1024];
+//
+//    server_ip.nxd_ip_version = NX_IP_VERSION_V4;
+//    server_ip.nxd_ip_address.v4 = IP_ADDRESS(144, 24, 206, 188);
+//
+//    uint8_t auth_flags = STSAFEA_PRVKEY_MODOPER_AUTHFLAG_CMD_RESP_SIGNEN | STSAFEA_PRVKEY_MODOPER_AUTHFLAG_MSG_DGST_SIGNEN | STSAFEA_PRVKEY_MODOPER_AUTHFLAG_KEY_ESTABLISHEN;
+//
+//    /* 1. STSAFE - Génération Paire de clés */
+//    while(1) {
+//        if (StSafeA_GenerateKeyPair(
+//        	    &stsafea_handle,
+//				STSAFEA_KEY_SLOT_EPHEMERAL,          // Slot 1
+//        	    0xFFFF,                      // Pas de limite d'utilisation
+//				STSAFEA_FLAG_TRUE,                           // InChangeAuthFlagsRight = autoriser le changement
+//				0x07,                        // InAuthorizationFlags = STSAFEA_PRVKEY_MODOPER_AUTHFLAG_KEY_ESTABLISHEN
+//        	    STSAFEA_NIST_P_256,          // Ou 0x0C si c'est une valeur directe
+//        	    32,                          // Longueur attendue (32 bytes pour P-256)
+//        	    &point_rep,
+//        	    &pubX,
+//        	    &pubY,
+//        	    STSAFEA_MAC_NONE             // Pas de MAC
+//        	) == STSAFEA_OK) break;
+//        tx_thread_sleep(100);
+//    }
+//    printf("Clé OK");
+//
+//    /* 2. Formatage JSON */
+//    sprintf(pub_key_hex, "04");
+//    for(int i=0; i<32; i++) sprintf(&pub_key_hex[(i*2)+2], "%02X", dataX[i]);
+//    for(int i=0; i<32; i++) sprintf(&pub_key_hex[66+(i*2)], "%02X", dataY[i]);
+//
+//    snprintf(json_payload, sizeof(json_payload), "{\"client_id\":\"Pierre_STM32\",\"client_public_key_hex\":\"%s\"}", pub_key_hex);
+//
+//    /* 3. Construction Requête HTTP */
+//    int req_len = snprintf(http_request, sizeof(http_request),
+//        "PUT /exchange/ecdh HTTP/1.1\r\nHost: 144.24.206.188:8000\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+//        (int)strlen(json_payload), json_payload);
+//
+//    /* 4. Connexion & Envoi */
+//    nx_tcp_socket_create(&IpInstance, &tcp_socket, "TCP RAW", NX_IP_NORMAL, NX_DONT_FRAGMENT, NX_IP_TIME_TO_LIVE, 8192, NX_NULL, NX_NULL);
+//    nx_tcp_client_socket_bind(&tcp_socket, NX_ANY_PORT, NX_WAIT_FOREVER);
+//
+//    ret = nxd_tcp_client_socket_connect(&tcp_socket, &server_ip, 8000, 500);
+//    if (ret == NX_SUCCESS) {
+//        if (nx_packet_allocate(&AppPool, &send_packet, NX_TCP_PACKET, TX_WAIT_FOREVER) == NX_SUCCESS) {
+//            nx_packet_data_append(send_packet, http_request, req_len, &AppPool, TX_WAIT_FOREVER);
+//            nx_tcp_socket_send(&tcp_socket, send_packet, 500);
+//        }
+//
+//        // --- LECTURE MULTI-PAQUETS ---
+//        int key_found = 0;
+//        while (nx_tcp_socket_receive(&tcp_socket, &response_packet, 500) == NX_SUCCESS) {
+//            char *data = (char *)response_packet->nx_packet_prepend_ptr;
+//            ULONG len = response_packet->nx_packet_length;
+//
+//            printf("PAQUET RECU (%lu octets)\n", len);
+//
+//            char *token = "server_public_key_hex\":\"";
+//            char *found = strstr(data, token);
+//
+//            if (found != NULL) {
+//                found += strlen(token);
+//                memcpy(server_pub_key_hex, found, 128);
+//                server_pub_key_hex[128] = '\0';
+//                printf(">>> CLE SERVEUR EXTRAITE : %s\n", server_pub_key_hex);
+//                key_found = 1;
+//            }
+//            nx_packet_release(response_packet);
+//            if (key_found) break;
+//        }
+//
+//        if (key_found) {
+//        	/* --- 5. CALCUL DU SECRET --- */
+//			uint8_t srvX[32];
+//			uint8_t srvY[32];
+//			StSafeA_LVBuffer_t srvX_lv = {32, srvX};
+//			StSafeA_LVBuffer_t srvY_lv = {32, srvY};
+//			StSafeA_SharedSecretBuffer_t shared_out;
+//			uint8_t shared_secret[32];
+//
+//			// 1. Initialisation des buffers
+//			memset(srvX, 0, 32);
+//			memset(srvY, 0, 32);
+//
+//			// 3. Conversion Hex -> Bin
+//			for (int i = 0; i < 32; i++) {
+//				unsigned int valX, valY;
+//				// X : on commence à l'index 2 (après le 04 de la string)
+//				sscanf(&server_pub_key_hex[0 + (i * 2)], "%02x", &valX);
+//				// Y : on commence à l'index 66
+//				sscanf(&server_pub_key_hex[64 + (i * 2)], "%02x", &valY);
+//
+//				srvX[i] = (uint8_t)valX; // On remplit à partir de l'index 1
+//				srvY[i] = (uint8_t)valY;
+//			}
+//
+//			// 4. Configuration de la structure de sortie
+//			shared_out.SharedKey.Length = 32;
+//			shared_out.SharedKey.Data = shared_secret;
+//
+//			ret = StSafeA_EstablishKey(&stsafea_handle,
+//					STSAFEA_KEY_SLOT_EPHEMERAL,
+//									   &srvX_lv,
+//									   &srvY_lv,
+//									   32,
+//									   &shared_out,
+//									   0, STSAFEA_MAC_HOST_CMAC);
+//
+//			if (ret == STSAFEA_OK) {
+//				printf(">>> VICTOIRE ! SHARED SECRET CALCULÉ\n");
+//				printf("SECRET: ");
+//				for(int i=0; i<32; i++) printf("%02X", shared_secret[i]);
+//				printf("\n");
+//			} else {
+//				printf("Erreur persistante: 0x%02X\n", ret);
+//			}
+//        //cleanup:
+//            nx_tcp_socket_disconnect(&tcp_socket, 100);
+//            nx_tcp_client_socket_unbind(&tcp_socket);
+//            nx_tcp_socket_delete(&tcp_socket);
+//            return (ret == STSAFEA_OK) ? NX_SUCCESS : NX_NOT_SUCCESSFUL;
+//        }
+//    }
+//
+//    // Nettoyage en cas d'erreur
+//    nx_tcp_socket_disconnect(&tcp_socket, 100);
+//    nx_tcp_client_socket_unbind(&tcp_socket);
+//    nx_tcp_socket_delete(&tcp_socket);
+//    return ret;
+//}
+
 /* USER CODE END 1 */
